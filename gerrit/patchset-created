@@ -97,13 +97,15 @@ class PatchsetCreated
   end
 
   def build_solano_payload(ref, commit)
-    remoteref = ref.sub(/^Arefs/, "refs/remotes/origin")
+    remoteref = ref.sub(/\Arefs/, "refs/remotes/origin")
+    synthetic_branch = ref.sub(/\Arefs\//, '')
 
     {
       "source" => "solano", 
       "refspec" => ["+#{ref}:#{remoteref}"], 
       "ref" => ref, 
-      "head" => commit
+      "head" => commit,
+      "branch" => synthetic_branch
     }.to_json
   end
 

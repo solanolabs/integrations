@@ -29,6 +29,18 @@ describe PatchsetCreated do
     end
   end
 
+  describe "#build_solano_payload" do
+    it "should synthesize branch" do
+      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "abcdef"))
+      expect(payload['branch']).to eq("changes/02/2/2")
+    end
+
+    it "should synthesize a refspec" do
+      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "abcdef"))
+      expect(payload['refspec'][0]).to eq("+refs/changes/02/2/2:refs/remotes/origin/changes/02/2/2")
+    end
+  end
+
   describe "#post_to_solano" do
     let(:ref) { "refs/changes/02/2/2" }
     let(:url) { "https://solano.example.com/foo/bar" }
