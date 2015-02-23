@@ -18,98 +18,135 @@ require 'net/http'
 require 'net/https'
 require 'syslog'
 
-# NOTE: Change GERRIT_API_PREFIX based on your Gerrit installation.  This should be the root URL after which the Gerrit API endpoints can be reached.
-GERRIT_API_PREFIX="http://localhost:8081/r"
+class PatchsetCreated
+  class MissingPatchset < RuntimeError; end
 
-# NOTE: Change SOLANO_CI_REPO_ENDPOINTS to map your Gerrit projects to Solano CI repo webhook URLs
-SOLANO_CI_REPO_ENDPOINTS= {
-  'solano' => "https://solano.example.com/hooks/1/builds/2235c40c2b88ba74ce7bd1d2580fa0daac706732"
-}
+  # NOTE: Change GERRIT_API_PREFIX based on your Gerrit installation.  This
+  # should be the root URL after which the Gerrit API endpoints can be reached
+  # from within the gerrit server itself.
+  GERRIT_API_PREFIX="http://localhost:8081/r"
 
-LOG_TO_SYSLOG=true
+  # NOTE: Change SOLANO_CI_REPO_ENDPOINTS to map your Gerrit projects to Solano
+  # CI repo webhook URLs
+  SOLANO_CI_REPO_ENDPOINTS= {
+    'solano' => "https://solano.example.com/hooks/1/builds/2235c40c2b88ba74ce7bd1d2580fa0daac706732"
+  }
 
-def putlog(msg)
-  if LOG_TO_SYSLOG
-    Syslog.log(Syslog::LOG_NOTICE, msg)
-  else
-    puts msg
-  end
-end
+  attr_accessor :gerrit_prefix, :endpoints, :syslog
 
-def fail_with(msg)
-  putlog(msg)
-  raise msg
-end
-
-def get_ref(change_id, patchset_num)
-  res = Net::HTTP.get(URI("#{GERRIT_API_PREFIX}/changes/?q=#{change_id}\&o=ALL_REVISIONS\&o=DOWNLOAD_COMMANDS"))
-
-  # Gerrit's API calls produce invalid JSON prefixed with various terminator characters
-  res = res.sub(/\A\)\]\}'/, '')
-  parsed = JSON.parse(res)
-
-  change = parsed[0]
-  patchnum = patchset_num.to_i
-
-  # Retrieve the gerrit hosted ref for this revision
-  rev = change["revisions"].select{|k,v| v["_number"] == patchnum}
-  ref_holder = rev.values.first["fetch"].select{|k,v| v.has_key?("ref")}.values.first
-
-  if ref_holder.nil?
-    fail_with("Gerrit change information is missing ref info; make sure the download-commands plugin is installed")
+  def initialize(gerrit_prefix=GERRIT_API_PREFIX, 
+                 endpoints=SOLANO_CI_REPO_ENDPOINTS, 
+                 syslog=true)
+    @gerrit_prefix = gerrit_prefix
+    @endpoints = endpoints
+    @syslog = syslog
   end
 
-  ref = ref_holder["ref"]
-end
+  def putlog(msg)
+    if syslog
+      Syslog.log(Syslog::LOG_NOTICE, msg)
+    else
+      puts msg
+    end
+  end
 
-def parse_options
-  options = {}
-  OptionParser.new do |opts|
-    opts.banner = "Usage: patchset-created [options]"
+  def fail_with(msg)
+    putlog(msg)
+    raise msg
+  end
 
-    opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
-      options[:verbose] = v
+  def get_ref(change_id, patchset_num)
+    res = Net::HTTP.get(URI("#{gerrit_prefix}/changes/?q=#{change_id}\&o=ALL_REVISIONS\&o=DOWNLOAD_COMMANDS"))
+
+    # Gerrit's API calls produce invalid JSON prefixed with various terminator characters
+    res = res.sub(/\A\)\]\}'/, '')
+    parsed = JSON.parse(res)
+
+    change = parsed[0]
+    patchnum = patchset_num.to_i
+
+    # Retrieve the gerrit hosted ref for this revision
+    rev = change["revisions"].select{|k,v| v["_number"] == patchnum}
+    if rev.values.size == 0
+      raise MissingPatchset.new("JSON response does not contain patch #{patchnum}: #{res}") 
     end
 
-    %w{change is-draft kind change-url change-owner project branch topic uploader commit patchset}.each do |o|
-      opts.on("--#{o} #{o.upcase}", String) { |v| options[o.to_sym] = v }
-    end
-  end.parse!
-  options
-end
+    ref_holder = rev.values.first["fetch"].select{|k,v| v.has_key?("ref")}.values.first
 
-def main
-  Syslog.open
-
-  begin
-    options = parse_options
-    putlog("options: #{options.inspect}")
-
-    solano_url = SOLANO_CI_REPO_ENDPOINTS[options[:project]]
-
-    if solano_url.nil?
-      fail_with "project #{options[:project]} isn't mapped to a Solano CI webhook"
+    if ref_holder.nil?
+      fail_with("Gerrit change information is missing ref info; make sure the download-commands plugin is installed")
     end
 
+    ref = ref_holder["ref"]
+  end
+
+  def parse_options
+    options = {}
+    OptionParser.new do |opts|
+      opts.banner = "Usage: patchset-created [options]"
+
+      opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
+        options[:verbose] = v
+      end
+
+      %w{change is-draft kind change-url change-owner project branch topic uploader commit patchset}.each do |o|
+        opts.on("--#{o} #{o.upcase}", String) { |v| options[o.to_sym] = v }
+      end
+    end.parse!
+    options
+  end
+
+  def build_solano_payload(ref, commit)
+    remoteref = ref.sub(/^Arefs/, "refs/remotes/origin")
+
+    {
+      "source" => "solano", 
+      "refspec" => ["+#{ref}:#{remoteref}"], 
+      "ref" => ref, 
+      "head" => commit
+    }.to_json
+  end
+
+  JSON_HEADERS = {
+    'Accept' => 'application/json', 
+    'Content-Type' =>'application/json'
+  }
+
+  def post_to_solano(solano_url, ref, commit)
     epurl = URI.parse(solano_url)
     http = Net::HTTP.new(epurl.host, epurl.port)
     http.use_ssl = true
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-    ref = get_ref(options[:change], options[:patchset])
-    remoteref = ref.sub(/^Arefs/, "refs/remotes/origin")
-    headers = {'Accept' => 'application/json', 'Content-Type' =>'application/json'}
-    body = {"source" => "solano", "refspec" => ["+#{ref}:#{remoteref}"], "ref" => ref, "head" => options[:commit]}.to_json
+    body = build_solano_payload(ref, commit)
 
     putlog("post body: #{body.inspect}")
-    res = http.post(epurl.path, body, headers)
-
+    res = http.post(epurl.path, body, JSON_HEADERS)
     putlog("response: #{res.inspect}")
-  rescue Exception => e
-    putlog("error: #{e.inspect}")
+  end
+
+  def main
+    Syslog.open
+
+    begin
+      options = parse_options
+      putlog("options: #{options.inspect}")
+
+      solano_url = endpoints[options[:project]]
+
+      if solano_url.nil?
+        fail_with "project #{options[:project]} isn't mapped to a Solano CI webhook"
+      end
+
+      ref = get_ref(options[:change], options[:patchset])
+      post_to_solano(solano_url, ref, options[:commit])
+
+    rescue Exception => e
+      putlog("error: #{e.inspect}")
+    end
   end
 end
 
 if __FILE__ == $0
-  main
+  PatchsetCreated.new.main
 end
