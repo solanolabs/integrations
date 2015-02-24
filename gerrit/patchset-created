@@ -32,7 +32,7 @@ class PatchsetCreated
     'solano' => "https://solano.example.com/hooks/1/builds/2235c40c2b88ba74ce7bd1d2580fa0daac706732"
   }
 
-  attr_accessor :gerrit_prefix, :endpoints, :syslog
+  attr_accessor :gerrit_prefix, :endpoints, :syslog, :change, :res
 
   def initialize(gerrit_prefix=GERRIT_API_PREFIX, 
                  endpoints=SOLANO_CI_REPO_ENDPOINTS, 
@@ -55,14 +55,20 @@ class PatchsetCreated
     raise msg
   end
 
-  def get_ref(change_id, patchset_num)
+  def retrieve_change_data(change_id)
     res = Net::HTTP.get(URI("#{gerrit_prefix}/changes/?q=#{change_id}\&o=ALL_REVISIONS\&o=DOWNLOAD_COMMANDS"))
-
     # Gerrit's API calls produce invalid JSON prefixed with various terminator characters
-    res = res.sub(/\A\)\]\}'/, '')
-    parsed = JSON.parse(res)
+    @res = res.sub(/\A\)\]\}'/, '')
+    parsed = JSON.parse(@res)
+    
+    @change = parsed[0]
+  end
 
-    change = parsed[0]
+  def get_ref(change_id, patchset_num)
+    if change.nil?
+      self.retrieve_change_data(change_id)
+    end
+
     patchnum = patchset_num.to_i
 
     # Retrieve the gerrit hosted ref for this revision
@@ -96,16 +102,15 @@ class PatchsetCreated
     options
   end
 
-  def build_solano_payload(ref, commit)
+  def build_solano_payload(ref, branch, commit)
     remoteref = ref.sub(/\Arefs/, "refs/remotes/origin")
-    synthetic_branch = ref.sub(/\Arefs\//, '')
 
     {
       "source" => "solano", 
       "refspec" => ["+#{ref}:#{remoteref}"], 
       "ref" => ref, 
       "head" => commit,
-      "branch" => synthetic_branch
+      "branch" => branch
     }.to_json
   end
 
@@ -114,13 +119,13 @@ class PatchsetCreated
     'Content-Type' =>'application/json'
   }
 
-  def post_to_solano(solano_url, ref, commit)
+  def post_to_solano(solano_url, ref, branch, commit)
     epurl = URI.parse(solano_url)
     http = Net::HTTP.new(epurl.host, epurl.port)
     http.use_ssl = true
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-    body = build_solano_payload(ref, commit)
+    body = build_solano_payload(ref, branch, commit)
 
     putlog("post body: #{body.inspect}")
     res = http.post(epurl.path, body, JSON_HEADERS)
@@ -141,7 +146,8 @@ class PatchsetCreated
       end
 
       ref = get_ref(options[:change], options[:patchset])
-      post_to_solano(solano_url, ref, options[:commit])
+      branch = change["_number"]
+      post_to_solano(solano_url, ref, branch, options[:commit])
 
     rescue Exception => e
       putlog("error: #{e.inspect}")

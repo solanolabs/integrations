@@ -30,14 +30,14 @@ describe PatchsetCreated do
   end
 
   describe "#build_solano_payload" do
-    it "should synthesize branch" do
-      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "abcdef"))
-      expect(payload['branch']).to eq("changes/02/2/2")
+    it "should synthesize a refspec" do
+      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "foo", "abcdef"))
+      expect(payload['refspec'][0]).to eq("+refs/changes/02/2/2:refs/remotes/origin/changes/02/2/2")
     end
 
-    it "should synthesize a refspec" do
-      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "abcdef"))
-      expect(payload['refspec'][0]).to eq("+refs/changes/02/2/2:refs/remotes/origin/changes/02/2/2")
+    it "should include the branch name" do
+      payload = JSON.parse(pc.build_solano_payload("refs/changes/02/2/2", "foo", "abcdef"))
+      expect(payload['branch']).to eq("foo")
     end
   end
 
@@ -52,10 +52,10 @@ describe PatchsetCreated do
       expect(http).to receive(:use_ssl=)
       expect(http).to receive(:verify_mode=)
       expect(Net::HTTP).to receive(:new).and_return(http)
-      expect(http).to receive(:post).with("/foo/bar", pc.build_solano_payload(ref, commit), PatchsetCreated::JSON_HEADERS)
+      expect(http).to receive(:post).with("/foo/bar", pc.build_solano_payload(ref, "gerrit/2",  commit), PatchsetCreated::JSON_HEADERS)
       expect(pc).to receive(:putlog).twice
 
-      pc.post_to_solano(url, ref, commit)
+      pc.post_to_solano(url, ref, "gerrit/2", commit)
     end
   end
 end
